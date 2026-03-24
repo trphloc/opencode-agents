@@ -2,7 +2,8 @@
 """Convert a .docx file to Markdown using mammoth + markdownify.
 
 Extracts header/footer content via python-docx and prepends/appends them
-to the converted Markdown output.
+to the converted Markdown output. Supports both text and image-based
+headers/footers.
 """
 
 import sys
@@ -12,12 +13,60 @@ import mammoth
 from docx import Document
 from markdownify import markdownify as md
 
+# XML namespaces used in OOXML
+_NS = {
+    "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+}
 
-def _extract_header_footer(input_path: Path) -> tuple[str, str]:
-    """Extract header and footer text from all sections of a DOCX file.
 
-    Returns (header_text, footer_text) as plain strings.
-    Deduplicates identical headers/footers across sections.
+def _extract_images_from_part(part, output_dir: Path, prefix: str) -> list[Path]:
+    """Extract embedded images from a header/footer part.
+
+    Searches the part's XML for drawing elements with image relationships,
+    saves them to output_dir, and returns a list of saved file paths.
+    Deduplicates by image blob content.
+    """
+    saved: list[Path] = []
+    seen_blobs: set[int] = set()  # track by blob hash to deduplicate
+
+    el = part._element
+    # Find all <a:blip> elements which reference embedded images
+    blips = el.findall(".//{%s}blip" % _NS["a"])
+    for blip in blips:
+        embed_id = blip.get("{%s}embed" % _NS["r"])
+        if not embed_id:
+            continue
+        try:
+            img_part = part.part.rels[embed_id].target_part
+        except KeyError:
+            continue
+
+        blob_hash = hash(img_part.blob)
+        if blob_hash in seen_blobs:
+            continue
+        seen_blobs.add(blob_hash)
+
+        # Determine file extension from content type (e.g. image/jpeg -> .jpeg)
+        ext = img_part.content_type.split("/")[-1]
+        if ext == "jpeg":
+            ext = "jpg"
+        img_filename = f"{prefix}_{len(saved) + 1}.{ext}"
+        img_path = output_dir / img_filename
+        img_path.write_bytes(img_part.blob)
+        saved.append(img_path)
+
+    return saved
+
+
+def _extract_header_footer(input_path: Path, output_dir: Path) -> tuple[str, str]:
+    """Extract header and footer content from all sections of a DOCX file.
+
+    Handles both text-based and image-based headers/footers.
+    Returns (header_md, footer_md) as Markdown strings.
+    Deduplicates identical content across sections.
     """
     doc = Document(str(input_path))
     headers: list[str] = []
@@ -26,23 +75,39 @@ def _extract_header_footer(input_path: Path) -> tuple[str, str]:
     for section in doc.sections:
         # --- Headers (prefer first-page header if it exists, else default) ---
         for hdr in (section.first_page_header, section.header):
-            if hdr and hdr.is_linked_to_previous is False or (hdr and hdr.paragraphs):
-                text = "\n".join(
-                    p.text.strip() for p in hdr.paragraphs if p.text.strip()
-                )
-                if text and text not in headers:
-                    headers.append(text)
-                break  # use the first non-empty header found
+            if hdr is None:
+                continue
+            # Try text first
+            text = "\n".join(p.text.strip() for p in hdr.paragraphs if p.text.strip())
+            if text and text not in headers:
+                headers.append(text)
+                break
+
+            # Try images if no text found
+            imgs = _extract_images_from_part(hdr, output_dir, "header")
+            if imgs:
+                md_imgs = "  ".join(f"![header]({img.name})" for img in imgs)
+                if md_imgs not in headers:
+                    headers.append(md_imgs)
+                break
 
         # --- Footers (prefer first-page footer if it exists, else default) ---
         for ftr in (section.first_page_footer, section.footer):
-            if ftr and ftr.is_linked_to_previous is False or (ftr and ftr.paragraphs):
-                text = "\n".join(
-                    p.text.strip() for p in ftr.paragraphs if p.text.strip()
-                )
-                if text and text not in footers:
-                    footers.append(text)
-                break  # use the first non-empty footer found
+            if ftr is None:
+                continue
+            # Try text first
+            text = "\n".join(p.text.strip() for p in ftr.paragraphs if p.text.strip())
+            if text and text not in footers:
+                footers.append(text)
+                break
+
+            # Try images if no text found
+            imgs = _extract_images_from_part(ftr, output_dir, "footer")
+            if imgs:
+                md_imgs = "  ".join(f"![footer]({img.name})" for img in imgs)
+                if md_imgs not in footers:
+                    footers.append(md_imgs)
+                break
 
     return "\n\n".join(headers), "\n\n".join(footers)
 
@@ -51,8 +116,8 @@ def convert_docx_to_md(input_path: Path) -> Path:
     """Convert a single .docx file to .md in the same directory."""
     output_path = input_path.with_suffix(".md")
 
-    # Step 1: Extract header/footer via python-docx
-    header_text, footer_text = _extract_header_footer(input_path)
+    # Step 1: Extract header/footer via python-docx (text or images)
+    header_text, footer_text = _extract_header_footer(input_path, input_path.parent)
 
     # Step 2: docx -> HTML (mammoth preserves structure: headings, lists, tables, bold/italic)
     with open(input_path, "rb") as f:
