@@ -225,10 +225,10 @@ def _footer_with_pagenum(
         x = w - tw - right_margin
         y = (h - th) // 2
 
-        # Shadow
-        draw.text((x + 1, y + 1), label, font=font, fill=(0, 0, 0, 160))
-        # White text
-        draw.text((x, y), label, font=font, fill=(255, 255, 255, 255))
+        # Shadow (light, for contrast on dark backgrounds)
+        draw.text((x + 1, y + 1), label, font=font, fill=(255, 255, 255, 120))
+        # Black text
+        draw.text((x, y), label, font=font, fill=(0, 0, 0, 255))
 
         import io
 
