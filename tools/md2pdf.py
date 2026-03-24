@@ -211,7 +211,6 @@ def _build_css(
 
     use_header_running = False
     use_footer_running = False
-    top_right_content = ""  # optional page-number fallback in @top-right
 
     # ---- @top-center ----
     if header_text:
@@ -229,13 +228,16 @@ def _build_css(
         top_style = ""
         margin_top = "2.5cm"
 
+    # Page number format: "X / Y" (no "Trang" prefix), always @bottom-right
+    _page_num_css = 'counter(page) " / " counter(pages)'
+
     # ---- @bottom-center ----
     # Priority: footer_text > footer_img > page numbers only > none
-    bottom_right_content = ""  # optional page-number in @bottom-right
+    bottom_right_content = ""  # page-number always in @bottom-right
     if footer_text:
         parts: list[str] = [f'"{_esc(footer_text)}"']
         if show_page_number:
-            parts += ['" \u2014 Trang "', "counter(page)", '" / "', "counter(pages)"]
+            parts += ['" \u2014 "', _page_num_css]
         bottom_content = "content: " + " ".join(parts) + ";"
         bottom_style = "font-size: 9pt; color: #555; border-top: 0.5pt solid #ccc; padding-top: 3pt;"
         margin_bottom = "2.8cm"
@@ -245,18 +247,13 @@ def _build_css(
         bottom_content = "content: element(page-footer);"
         bottom_style = f"height: {f_cm:.3f}cm; vertical-align: top;"
         use_footer_running = True
-        # Page numbers: put in @top-right (beside header image) if header image
-        # is also present, else fall back to @bottom-right above the footer image.
         if show_page_number:
-            page_num_css = '"Trang " counter(page) " / " counter(pages)'
-            if use_header_running:
-                top_right_content = f"content: {page_num_css};"
-            else:
-                bottom_right_content = f"content: {page_num_css};"
+            bottom_right_content = f"content: {_page_num_css};"
     elif show_page_number:
-        bottom_content = 'content: "Trang " counter(page) " / " counter(pages);'
-        bottom_style = "font-size: 9pt; color: #555; border-top: 0.5pt solid #ccc; padding-top: 3pt;"
-        margin_bottom = "2.8cm"
+        bottom_content = "content: none;"
+        bottom_style = ""
+        margin_bottom = "2.5cm"
+        bottom_right_content = f"content: {_page_num_css};"
     else:
         bottom_content = "content: none;"
         bottom_style = ""
@@ -292,13 +289,8 @@ def _build_css(
 """
 
     bottom_right_block = (
-        f"\n    @bottom-right {{\n        {bottom_right_content}\n        font-size: 9pt; color: #555;\n    }}"
+        f"\n    @bottom-right {{\n        {bottom_right_content}\n        font-size: 9pt; color: #555; white-space: nowrap;\n    }}"
         if bottom_right_content
-        else ""
-    )
-    top_right_block = (
-        f"\n    @top-right {{\n        {top_right_content}\n        font-size: 9pt; color: #555; vertical-align: bottom; padding-bottom: 3pt;\n    }}"
-        if top_right_content
         else ""
     )
 
@@ -318,7 +310,7 @@ def _build_css(
         {bottom_content}
         {bottom_style}
         width: 100%;
-    }}{bottom_right_block}{top_right_block}
+    }}{bottom_right_block}
 }}
 {running_css}
 
