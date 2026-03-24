@@ -171,6 +171,92 @@ def _img_to_data_uri(img_path: Path) -> str:
     return f"data:{mime};base64,{data}"
 
 
+def _img_bytes_to_data_uri(img_bytes: bytes, fmt: str = "PNG") -> str:
+    """Encode raw image bytes as a base64 PNG data URI."""
+    data = base64.b64encode(img_bytes).decode("ascii")
+    return f"data:image/png;base64,{data}"
+
+
+def _footer_with_pagenum(
+    img_path: Path, page: int, total: int, page_width_cm: float = 17.0
+) -> bytes:
+    """Return PNG bytes of the footer image with 'page / total' drawn on it.
+
+    Text is placed at the right side, vertically centred, in white with a
+    subtle dark shadow for legibility on any background colour.
+    Falls back to raw image bytes if Pillow is unavailable.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+        with Image.open(img_path) as im:
+            img = im.convert("RGBA")
+
+        w, h = img.size
+        draw = ImageDraw.Draw(img)
+
+        label = f"{page} / {total}"
+
+        # Font size: target ~9pt at 96 dpi scaled to image width
+        # A4 content width = 17cm = ~643px at 96dpi; image fills that width
+        scale = w / (page_width_cm * 96 / 2.54)
+        font_px = max(18, int(18 * scale))
+
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont
+        for font_path in [
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]:
+            try:
+                font = ImageFont.truetype(font_path, size=font_px)
+                break
+            except Exception:
+                continue
+        else:
+            font = ImageFont.load_default()
+
+        # Measure text
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+        # Position: right margin 1.5% of width, vertically centred
+        right_margin = int(w * 0.015)
+        x = w - tw - right_margin
+        y = (h - th) // 2
+
+        # Shadow
+        draw.text((x + 1, y + 1), label, font=font, fill=(0, 0, 0, 160))
+        # White text
+        draw.text((x, y), label, font=font, fill=(255, 255, 255, 255))
+
+        import io
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    except Exception:
+        # Pillow unavailable or error — return raw bytes of original image
+        return img_path.read_bytes()
+
+
+def _count_pdf_pages(pdf_bytes: bytes) -> int:
+    """Return the number of pages in a PDF given its raw bytes."""
+    try:
+        import pypdfium2 as pdfium  # type: ignore
+
+        doc = pdfium.PdfDocument(pdf_bytes)
+        pages = list(doc)
+        n = len(pages)
+        for p in pages:
+            p.close()
+        doc.close()
+        return n
+    except Exception:
+        return 1
+
+
 def _img_height_cm(img_path: Path, page_width_cm: float = 17.0) -> float:
     """Calculate the scaled height (cm) of an image fitted to page_width_cm.
 
@@ -194,23 +280,22 @@ def _build_css(
     footer_img: str | None,
     show_page_number: bool,
     base_dir: Path,
+    footer_nth_css: str = "",
 ) -> str:
     """Build the full CSS with header/footer guaranteed on every page.
 
     Strategy:
       - TEXT  → injected as CSS content: "..." in @page margin boxes.
-                Pure CSS, always on every page.
-      - IMAGE → injected as position:running() HTML element containing
-                <img style="width:100%">.  WeasyPrint scales the image
-                correctly when width:100% is set on the <img> tag inside
-                a running element (unlike content:url() which ignores sizing).
+      - IMAGE header → position:running() HTML element, <img width="100%">
+      - IMAGE footer → @page:nth(n) rules, one running element per page,
+                       each with the footer image + page number baked in via Pillow.
+                       footer_nth_css is pre-built by convert_md_to_pdf().
     """
 
     def _esc(t: str) -> str:
         return t.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
     use_header_running = False
-    use_footer_running = False
 
     # ---- @top-center ----
     if header_text:
@@ -228,12 +313,12 @@ def _build_css(
         top_style = ""
         margin_top = "2.5cm"
 
-    # Page number format: "X / Y" (no "Trang" prefix), always @bottom-right
+    # Page number format: "X / Y" (no "Trang" prefix)
     _page_num_css = 'counter(page) " / " counter(pages)'
 
     # ---- @bottom-center ----
-    # Priority: footer_text > footer_img > page numbers only > none
-    bottom_right_content = ""  # page-number always in @bottom-right
+    # Priority: footer_text > footer_img (handled via nth_css) > page numbers only > none
+    bottom_right_content = ""
     if footer_text:
         parts: list[str] = [f'"{_esc(footer_text)}"']
         if show_page_number:
@@ -244,11 +329,9 @@ def _build_css(
     elif footer_img and (base_dir / footer_img).resolve().exists():
         f_cm = _img_height_cm((base_dir / footer_img).resolve())
         margin_bottom = f"{f_cm + 0.3:.2f}cm"
-        bottom_content = "content: element(page-footer);"
-        bottom_style = f"height: {f_cm:.3f}cm; vertical-align: top;"
-        use_footer_running = True
-        if show_page_number:
-            bottom_right_content = f"content: {_page_num_css};"
+        # footer content handled by @page:nth rules in footer_nth_css
+        bottom_content = "content: none;"
+        bottom_style = ""
     elif show_page_number:
         bottom_content = "content: none;"
         bottom_style = ""
@@ -259,7 +342,7 @@ def _build_css(
         bottom_style = ""
         margin_bottom = "2.5cm"
 
-    # Running element CSS (only emitted when an image is used)
+    # Running element CSS for header image
     running_css = ""
     if use_header_running:
         running_css += """
@@ -269,19 +352,6 @@ def _build_css(
     margin: 0; padding: 0;
 }
 #page-header img {
-    display: block;
-    width: 100%;
-    height: auto;
-}
-"""
-    if use_footer_running:
-        running_css += """
-#page-footer {
-    position: running(page-footer);
-    width: 100%;
-    margin: 0; padding: 0;
-}
-#page-footer img {
     display: block;
     width: 100%;
     height: auto;
@@ -312,6 +382,7 @@ def _build_css(
         width: 100%;
     }}{bottom_right_block}
 }}
+{footer_nth_css}
 {running_css}
 
 /* ---------- Body typography ---------- */
@@ -388,6 +459,28 @@ img {{ max-width: 100%; height: auto; }}
 # ---------------------------------------------------------------------------
 
 
+def _build_html(
+    title: str,
+    css: str,
+    running_divs: str,
+    body_html: str,
+) -> str:
+    """Assemble a full HTML document ready for WeasyPrint."""
+    return f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="utf-8">
+    <title>{html_mod.escape(title)}</title>
+    <style>
+{css}
+    </style>
+</head>
+<body>
+{running_divs}{body_html}
+</body>
+</html>"""
+
+
 def convert_md_to_pdf(
     input_path: Path,
     output_path: Path | None = None,
@@ -397,6 +490,12 @@ def convert_md_to_pdf(
     no_page_number: bool = False,
 ) -> tuple[Path, dict]:
     """Convert a single .md file to .pdf.
+
+    When a footer IMAGE is used, a 2-pass strategy is applied:
+      Pass 1: render a no-footer-image PDF → count total pages.
+      Pass 2: bake per-page page numbers into footer PNGs (Pillow),
+              inject one @page:nth(n) rule + one running <div> per page,
+              render the final PDF.
 
     Returns (output_path, info_dict) for status reporting.
     """
@@ -425,7 +524,7 @@ def convert_md_to_pdf(
     resolved_header_img = None if resolved_header_text else body_header_img
     resolved_footer_img = None if resolved_footer_text else body_footer_img
 
-    # 6. Markdown → HTML
+    # 6. Markdown → HTML body
     md_conv = markdown.Markdown(
         extensions=MD_EXTENSIONS, extension_configs=MD_EXTENSION_CONFIGS
     )
@@ -437,50 +536,122 @@ def convert_md_to_pdf(
         m = re.search(r"<h1[^>]*>(.*?)</h1>", body_html)
         title = re.sub(r"<[^>]+>", "", m.group(1)) if m else input_path.stem
 
-    # 8. CSS
-    final_css = css or _build_css(
-        header_text=resolved_header_text,
-        header_img=resolved_header_img,
-        footer_text=resolved_footer_text,
-        footer_img=resolved_footer_img,
-        show_page_number=not no_page_number,
-        base_dir=base_dir,
-    )
+    # 8. Resolve the actual footer image path (if any)
+    footer_img_path: Path | None = None
+    if resolved_footer_img and not resolved_footer_text and not css:
+        candidate = (base_dir / resolved_footer_img).resolve()
+        if candidate.exists():
+            footer_img_path = candidate
 
-    # 9. Build running-element HTML divs for image header/footer
-    #    (needed when _build_css emits content: element(page-header/footer))
-    running_divs = ""
-    if resolved_header_img:
+    # 9. Build header running-div (used in both passes)
+    header_running_div = ""
+    if resolved_header_img and not css:
         header_img_path = (base_dir / resolved_header_img).resolve()
         if header_img_path.exists():
             data_uri = _img_to_data_uri(header_img_path)
-            running_divs += (
+            header_running_div = (
                 f'<div id="page-header"><img src="{data_uri}" alt="header"></div>\n'
             )
-    if resolved_footer_img:
-        footer_img_path = (base_dir / resolved_footer_img).resolve()
-        if footer_img_path.exists():
-            data_uri = _img_to_data_uri(footer_img_path)
-            running_divs += (
-                f'<div id="page-footer"><img src="{data_uri}" alt="footer"></div>\n'
+
+    # -----------------------------------------------------------------------
+    # 10. TWO-PASS when footer image is present; single-pass otherwise
+    # -----------------------------------------------------------------------
+    if footer_img_path and not css:
+        # ---- PASS 1: render without footer image to count pages ----
+        css_pass1 = _build_css(
+            header_text=resolved_header_text,
+            header_img=resolved_header_img,
+            footer_text=resolved_footer_text,
+            footer_img=None,  # no footer in pass 1
+            show_page_number=False,  # we don't need page nums in pass 1
+            base_dir=base_dir,
+            footer_nth_css="",
+        )
+        html_pass1 = _build_html(title, css_pass1, header_running_div, body_html)
+        pdf_bytes_pass1 = (
+            HTML(string=html_pass1, base_url=str(base_dir)).write_pdf() or b""
+        )
+        total_pages = _count_pdf_pages(pdf_bytes_pass1)
+
+        # ---- Build per-page footer PNGs + CSS + divs ----
+        footer_nth_parts: list[str] = []
+        footer_running_css_parts: list[str] = []
+        footer_div_parts: list[str] = []
+
+        f_cm = _img_height_cm(footer_img_path)
+
+        for n in range(1, total_pages + 1):
+            png_bytes = _footer_with_pagenum(
+                footer_img_path,
+                page=n,
+                total=total_pages,
+            )
+            data_uri = _img_bytes_to_data_uri(png_bytes, fmt="PNG")
+            elem_name = f"page-footer-{n}"
+            div_id = f"page-footer-{n}"
+
+            # @page:nth(n) rule
+            footer_nth_parts.append(
+                f"@page:nth({n}) {{\n"
+                f"    @bottom-center {{\n"
+                f"        content: element({elem_name});\n"
+                f"        height: {f_cm:.3f}cm;\n"
+                f"        vertical-align: bottom;\n"
+                f"        width: 100%;\n"
+                f"    }}\n"
+                f"}}"
             )
 
-    # 10. Assemble + render
-    html_doc = f"""<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="utf-8">
-    <title>{html_mod.escape(title)}</title>
-    <style>
-{final_css}
-    </style>
-</head>
-<body>
-{running_divs}{body_html}
-</body>
-</html>"""
+            # running element CSS
+            footer_running_css_parts.append(
+                f"#{div_id} {{\n"
+                f"    position: running({elem_name});\n"
+                f"    width: 100%;\n"
+                f"    margin: 0; padding: 0;\n"
+                f"}}\n"
+                f"#{div_id} img {{\n"
+                f"    display: block;\n"
+                f"    width: 100%;\n"
+                f"    height: auto;\n"
+                f"}}"
+            )
 
-    HTML(string=html_doc, base_url=str(base_dir)).write_pdf(str(output_path))
+            # HTML div
+            footer_div_parts.append(
+                f'<div id="{div_id}"><img src="{data_uri}" alt="footer page {n}"></div>'
+            )
+
+        footer_nth_css = "\n".join(footer_nth_parts)
+        footer_running_css = "\n".join(footer_running_css_parts)
+        footer_divs = "\n".join(footer_div_parts)
+
+        # ---- PASS 2: render with per-page footer images ----
+        css_pass2 = _build_css(
+            header_text=resolved_header_text,
+            header_img=resolved_header_img,
+            footer_text=resolved_footer_text,
+            footer_img=str(footer_img_path),  # only used for margin calc
+            show_page_number=not no_page_number,
+            base_dir=base_dir,
+            footer_nth_css=footer_nth_css + "\n" + footer_running_css,
+        )
+        running_divs = header_running_div + footer_divs + "\n"
+        html_pass2 = _build_html(title, css_pass2, running_divs, body_html)
+        HTML(string=html_pass2, base_url=str(base_dir)).write_pdf(str(output_path))
+
+    else:
+        # ---- SINGLE PASS (no footer image) ----
+        final_css = css or _build_css(
+            header_text=resolved_header_text,
+            header_img=resolved_header_img,
+            footer_text=resolved_footer_text,
+            footer_img=resolved_footer_img,
+            show_page_number=not no_page_number,
+            base_dir=base_dir,
+        )
+        running_divs = header_running_div
+        html_doc = _build_html(title, final_css, running_divs, body_html)
+        HTML(string=html_doc, base_url=str(base_dir)).write_pdf(str(output_path))
 
     info = {
         "header_text": resolved_header_text,
