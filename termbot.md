@@ -170,6 +170,89 @@ When the platform is ambiguous, ask or check (`uname -s`) before executing platf
 
 ---
 
+## Shell Environment Awareness (~/.zshrc)
+
+Before executing tasks, be aware of the user's shell environment. At the start of a session or when relevant, read `~/.zshrc` to understand:
+
+1. **Existing aliases** — avoid creating commands that conflict with or duplicate what the user already has.
+2. **Installed tools & paths** — know what's available (e.g., JAVA_HOME, nvm, Android SDK path) to leverage them directly.
+3. **SSH shortcuts** — the user has many `ssh*` aliases; use them when referencing remote connections instead of raw ssh commands.
+4. **Custom tool aliases** — e.g., the user has `docling` as an alias for PDF-to-Markdown conversion; suggest it when relevant.
+
+### Quick Reference: User's Common Aliases & Environment
+
+| Category | What's configured |
+|----------|-------------------|
+| SSH connections | `sshhcmus`, `sshfit`, `sshhvps*`, `sshmpc*`, `sshadp*`, `sshyay*`, `sshpmsdev`, `sshpmspro`, `sshtoidm*`, etc. |
+| Android SDK | `adb` → `~/Library/Android/sdk/platform-tools/adb` |
+| PDF conversion | `docling` → activates venv + runs `pdf2md.py` |
+| Java | `JAVA_HOME` → JDK 17 |
+| Node.js | `nvm` loaded via `$HOME/.nvm/nvm.sh` |
+| Python | Antigravity CLI in PATH; `docling-env` venv available |
+
+### Suggesting New Aliases
+
+When the user performs a task that they are likely to repeat, proactively suggest adding a short alias to `~/.zshrc`. Follow this format:
+
+```bash
+# Description of what this alias does
+alias shortname="the full command"
+```
+
+Rules for alias suggestions:
+- **Naming convention**: Keep names short (2–6 chars), lowercase, descriptive. Use prefixes for grouping (e.g., `ssh*` for SSH, `dk*` for Docker, `g*` for Git).
+- **No conflicts**: Always check against existing aliases in `~/.zshrc` before suggesting.
+- **Ask before modifying**: Never append to `~/.zshrc` without explicit user approval. Present the alias and let the user decide.
+- **Common useful aliases to suggest when relevant**:
+
+```bash
+# --- Navigation ---
+alias ..="cd .."
+alias ...="cd ../.."
+alias ll="ls -alFh"
+alias la="ls -A"
+
+# --- Git shortcuts ---
+alias gs="git status"
+alias ga="git add"
+alias gc="git commit"
+alias gp="git push"
+alias gl="git log --oneline --graph -20"
+alias gd="git diff"
+alias gb="git branch"
+alias gco="git checkout"
+
+# --- Docker shortcuts ---
+alias dps="docker ps"
+alias dpsa="docker ps -a"
+alias dimg="docker images"
+alias dcu="docker compose up -d"
+alias dcd="docker compose down"
+alias dcl="docker compose logs -f"
+
+# --- Python ---
+alias py="python3"
+alias venv="python3 -m venv .venv && source .venv/bin/activate"
+alias activate="source .venv/bin/activate"
+alias pipi="pip install"
+alias pipr="pip install -r requirements.txt"
+
+# --- npm/Node ---
+alias ni="npm install"
+alias nr="npm run"
+alias nrd="npm run dev"
+alias nrb="npm run build"
+
+# --- Utilities ---
+alias ports="lsof -i -P -n | grep LISTEN"
+alias myip="curl -s ifconfig.me"
+alias weather="curl -s wttr.in"
+alias sizeof="du -sh"
+alias cleanup="find . -name '.DS_Store' -delete"
+```
+
+---
+
 ## Constraint Logic — Strict Rules
 
 ### DO:
