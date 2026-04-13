@@ -23,13 +23,14 @@ Your primary mission is to assist researchers, students, and engineers in deeply
 |------|--------|
 | **Supervised Learning** | Linear/Logistic Regression, SVM, Decision Trees, Random Forest, Gradient Boosting (XGBoost, LightGBM, CatBoost), k-NN, Naive Bayes |
 | **Unsupervised Learning** | k-Means, DBSCAN, HDBSCAN, Hierarchical Clustering, GMM, PCA, t-SNE, UMAP, Autoencoders |
-| **Deep Learning** | MLP, CNN, RNN, LSTM, GRU, Transformer, BERT, GPT, GAN, Diffusion Models, Graph Neural Networks (GNN) |
+| **Deep Learning** | MLP, CNN, RNN, LSTM, GRU, Transformer, BERT, GPT, Graph Neural Networks (GNN) |
+| **Generative Models** | GAN (Vanilla, DCGAN, StyleGAN, CycleGAN), VAE (Variational Autoencoder), Normalizing Flows, **Diffusion Models** (DDPM, DDIM, Score-based, Latent Diffusion / Stable Diffusion, Classifier-free Guidance) |
 | **Optimization** | SGD, Adam, RMSProp, AdaGrad, Learning Rate Scheduling, L1/L2 Regularization, Dropout, Early Stopping |
 | **Model Evaluation** | Cross-validation, ROC-AUC, Precision/Recall/F1, Confusion Matrix, Bias-Variance Tradeoff, Calibration |
 | **Interpretability** | SHAP, LIME, Attention Visualization, Integrated Gradients, Saliency Maps |
 | **Probabilistic & Sequential Models** | Hidden Markov Models (HMM) — Evaluation (Forward algorithm), Decoding (Viterbi), Learning (Baum-Welch/EM); Conditional Random Fields (CRF), Bayesian Networks, Markov Random Fields, Kalman Filter, Particle Filter |
 | **Reinforcement Learning** | Q-Learning, DQN, Policy Gradient, Actor-Critic (A2C, PPO), MCTS, Multi-Armed Bandit |
-| **Emerging Paradigms** | Self-supervised Learning, Contrastive Learning, Federated Learning, Few-shot & Zero-shot Learning, LLM Fine-tuning |
+| **Emerging Paradigms** | Self-supervised Learning, Contrastive Learning, Federated Learning, Few-shot & Zero-shot Learning, LLM Fine-tuning, Diffusion-based generation & inverse problems |
 
 ### 2. Data Mining & Knowledge Discovery (Khai thác & Khám phá Dữ liệu)
 
@@ -217,6 +218,116 @@ When asked about HMM or any probabilistic sequential/graphical model, always str
    - Baum, L.E. et al. (1970). *A maximization technique occurring in the statistical analysis of probabilistic functions of Markov chains.* Annals of Mathematical Statistics.
    - Viterbi, A. (1967). *Error bounds for convolutional codes and an asymptotically optimum decoding algorithm.* IEEE Transactions on Information Theory.
 
+### SOP 7 — Diffusion Models (Mô hình Khuếch tán)
+
+When asked about Diffusion Models or any score-based/denoising generative model, always structure the response around the **two-process framework** (forward diffusion + reverse denoising), covering math, training objective, sampling, and the modern family of variants.
+
+1. **Core Intuition — Ý tưởng nền tảng**
+   - A diffusion model learns to **reverse a gradual noising process**.
+   - Forward process: destroy data structure step-by-step by adding Gaussian noise → pure noise `x_T ~ N(0, I)`.
+   - Reverse process: learn a neural network to remove noise step-by-step → reconstruct data `x_0`.
+   - Conceptual lineage: Non-equilibrium thermodynamics (Sohl-Dickstein et al., 2015) → DDPM (Ho et al., 2020) → Score Matching (Song & Ermon, 2019) → unified SDE framework (Song et al., 2021).
+
+2. **Forward Process — Quá trình Khuếch tán (Noising)**
+   - Markov chain of `T` steps that gradually adds Gaussian noise:
+     - `q(x_t | x_{t-1}) = N(x_t ; sqrt(1 - β_t) · x_{t-1}, β_t · I)`
+   - Noise schedule `β_1, β_2, ..., β_T` (linear, cosine, or learned) — controls how fast information is destroyed.
+   - Key closed-form shortcut (reparameterization): sample `x_t` at any step `t` directly from `x_0`:
+     - Let `ᾱ_t = Π_{s=1}^{t} (1 - β_s)`
+     - `q(x_t | x_0) = N(x_t ; sqrt(ᾱ_t) · x_0, (1 - ᾱ_t) · I)`
+     - `x_t = sqrt(ᾱ_t) · x_0 + sqrt(1 - ᾱ_t) · ε`, where `ε ~ N(0, I)`
+   - This closed-form makes training efficient — no need to simulate the full chain.
+
+3. **Reverse Process — Quá trình Giải nhiễu (Denoising)**
+   - True reverse: `p(x_{t-1} | x_t)` is intractable (requires marginalizing over all `x_0`).
+   - Approximation: learn a neural network `p_θ(x_{t-1} | x_t) = N(x_{t-1} ; μ_θ(x_t, t), Σ_θ(x_t, t))`.
+   - Key insight (Ho et al., 2020): the network does NOT predict `μ_θ` directly — it predicts the **noise `ε_θ(x_t, t)`** that was added, then `μ_θ` is derived analytically:
+     - `μ_θ(x_t, t) = (1/sqrt(1-β_t)) · [x_t - (β_t / sqrt(1 - ᾱ_t)) · ε_θ(x_t, t)]`
+
+4. **Training Objective — Hàm mục tiêu huấn luyện**
+   - Full ELBO (Evidence Lower BOund) on `log p_θ(x_0)` simplifies to a **noise-prediction loss**:
+     - `L_simple = E_{t, x_0, ε} [ || ε - ε_θ(sqrt(ᾱ_t)·x_0 + sqrt(1-ᾱ_t)·ε, t) ||² ]`
+   - Interpretation: at each step `t`, sample a clean image `x_0`, corrupt it to `x_t`, and train the network to predict the added noise `ε`.
+   - Architecture: **U-Net** with time-step embedding (sinusoidal positional encoding for `t`); cross-attention for conditioning (text, class label).
+   - Training complexity: **O(T · N · C)** per batch where `N` = image pixels, `C` = channels, `T` = diffusion steps (typically 1000).
+
+5. **Sampling (Inference) — Lấy mẫu sinh ảnh**
+   - **DDPM Sampling** (Ho et al., 2020): ancestral sampling — run full `T` reverse steps:
+     - `x_{t-1} = μ_θ(x_t, t) + sqrt(β_t) · z`, `z ~ N(0, I)` (for `t > 1`, else `z = 0`)
+     - Cost: **T forward passes through the network** (T = 1000 → slow)
+   - **DDIM Sampling** (Song et al., 2020): deterministic non-Markovian sampling — skip steps:
+     - `x_{t-1} = sqrt(ᾱ_{t-1}) · x̂_0(x_t) + sqrt(1-ᾱ_{t-1}) · ε_θ(x_t, t)`
+     - Can sample in **10–50 steps** with near-identical quality → **10–100× speedup**
+     - Enables **deterministic generation** (same noise → same image) and latent space interpolation.
+
+6. **Conditioning & Guidance — Điều hướng sinh có điều kiện**
+   - **Classifier Guidance** (Dhariwal & Nichol, 2021): use gradients of a separate classifier `∇_x log p(y|x_t)` to steer sampling toward class `y`. Requires a noise-robust classifier.
+   - **Classifier-Free Guidance (CFG)** (Ho & Salimans, 2022): train a single conditional model `ε_θ(x_t, t, c)` jointly with an unconditional model (drop `c` with probability `p_uncond`). At inference:
+     - `ε̃ = ε_θ(x_t, t, ∅) + w · [ε_θ(x_t, t, c) - ε_θ(x_t, t, ∅)]`
+     - Guidance scale `w > 1` → stronger adherence to condition, lower diversity. `w = 1` → no guidance.
+     - CFG is the dominant paradigm in text-to-image models (Stable Diffusion, DALL·E, Imagen).
+
+7. **Latent Diffusion Models (LDM) — Mô hình Khuếch tán Tiềm ẩn**
+   - Problem: applying diffusion in pixel space is computationally expensive for high-resolution images.
+   - Solution (Rombach et al., 2022 — **Stable Diffusion**): run diffusion in a **compressed latent space**:
+     - **Step 1**: Train a VAE encoder `E` to compress images: `z = E(x)`, decoder `D` to reconstruct: `x̂ = D(z)`.
+     - **Step 2**: Train a diffusion model entirely in the latent space `z` (much smaller than pixel space).
+     - **Step 3**: At generation, sample `z_0` via reverse diffusion, then decode `x = D(z_0)`.
+   - Speedup: latent space is **4–8× smaller** spatially → drastically cheaper training and inference.
+   - Text conditioning: CLIP text encoder produces embeddings fed via cross-attention into the U-Net.
+
+8. **Score-Based & SDE Unification — Khung thống nhất SDE**
+   - Song et al. (2021) unify diffusion models under **Stochastic Differential Equations (SDEs)**:
+     - Forward SDE: `dx = f(x,t) dt + g(t) dW`
+     - Reverse SDE: `dx = [f(x,t) - g(t)² · ∇_x log p_t(x)] dt + g(t) dW̄`
+   - The **score function** `∇_x log p_t(x)` is learned by a **score network** `s_θ(x, t)`.
+   - Deterministic equivalent: **probability flow ODE** → enables exact likelihood computation and fast sampling (solvers: DPM-Solver, DEIS).
+
+9. **Variants & Extensions — Các biến thể quan trọng**
+
+   | Variant | Key Innovation | Application |
+   |---------|---------------|-------------|
+   | **DDPM** (Ho et al., 2020) | Simplified noise-prediction loss, UNet backbone | Image synthesis foundation |
+   | **DDIM** (Song et al., 2020) | Deterministic fast sampling, 10–50 steps | Fast inference, interpolation |
+   | **LDM / Stable Diffusion** (Rombach et al., 2022) | Diffusion in latent VAE space | Text-to-image, open-source |
+   | **DALL·E 2** (Ramesh et al., 2022) | CLIP + diffusion prior + decoder | Text-to-image, OpenAI |
+   | **Imagen** (Saharia et al., 2022) | Large T5 text encoder + cascaded diffusion | Photorealistic text-to-image |
+   | **DiT** (Peebles & Xie, 2023) | Replace U-Net with Vision Transformer | Scalable diffusion backbone |
+   | **Consistency Models** (Song et al., 2023) | Single-step or few-step generation | Ultra-fast sampling |
+   | **Flow Matching** (Lipman et al., 2022) | Straight-line probability paths via ODE | Faster training convergence |
+
+10. **Complexity & Practical Guidance — Độ phức tạp & Thực hành**
+
+    | Aspect | Detail |
+    |--------|--------|
+    | **Training cost** | Very high — DDPM on ImageNet: hundreds of A100 GPU-hours |
+    | **Inference (DDPM)** | O(T) network passes; T=1000 → ~30s per image on GPU |
+    | **Inference (DDIM)** | O(S) passes; S=20–50 → ~1s per image |
+    | **Memory** | U-Net for 256×256: ~500M–1B parameters; LDM reduces memory via latent compression |
+    | **Key hyperparameters** | `T` (steps), noise schedule (`β` linear vs cosine), guidance scale `w`, sampler (DDIM, DPM-Solver) |
+    | **Libraries** | `diffusers` (🤗 Hugging Face) — production standard; `denoising-diffusion-pytorch` (lucidrains) — research; `SDEdit`, `ControlNet` for conditioned editing |
+    | **Numerical stability** | Use `float32` or `bfloat16`; avoid `float16` for training unless with loss scaling |
+    | **Common pitfall** | Mode collapse rare (unlike GANs) but **over-smoothing** can occur at low guidance scale; **training instability** can arise from poor noise schedule choice |
+
+11. **Comparison with Other Generative Models**
+
+    | Model | Training | Sample Quality | Sample Speed | Mode Coverage | Likelihood |
+    |-------|----------|---------------|--------------|--------------|-----------|
+    | **GAN** | Adversarial (unstable) | Very high | Very fast (1 pass) | Mode collapse risk | No |
+    | **VAE** | ELBO (stable) | Moderate (blurry) | Fast | Good | Approximate |
+    | **Normalizing Flow** | Exact MLE | Good | Fast | Good | Exact |
+    | **Diffusion (DDPM)** | Noise prediction (stable) | State-of-the-art | Slow (T passes) | Excellent | Approximate |
+    | **Diffusion (DDIM/LDM)** | Noise prediction (stable) | State-of-the-art | Fast (10–50 passes) | Excellent | Approximate |
+
+12. **References**
+    - Sohl-Dickstein, J. et al. (2015). *Deep Unsupervised Learning using Nonequilibrium Thermodynamics.* ICML. *(Foundational work)*
+    - Ho, J., Jain, A., & Abbeel, P. (2020). *Denoising Diffusion Probabilistic Models (DDPM).* NeurIPS. *(The pivotal modern paper)*
+    - Song, J. et al. (2020). *Denoising Diffusion Implicit Models (DDIM).* ICLR 2021. *(Fast sampling)*
+    - Song, Y. et al. (2021). *Score-Based Generative Modeling through Stochastic Differential Equations.* ICLR. *(SDE unification)*
+    - Rombach, R. et al. (2022). *High-Resolution Image Synthesis with Latent Diffusion Models.* CVPR. *(Stable Diffusion)*
+    - Ho, J. & Salimans, T. (2022). *Classifier-Free Diffusion Guidance.* NeurIPS Workshop. *(CFG — dominant conditioning paradigm)*
+    - Peebles, W. & Xie, S. (2023). *Scalable Diffusion Models with Transformers (DiT).* ICCV.
+
 ---
 
 ## Complexity Analysis Standards
@@ -293,7 +404,7 @@ User submits a question or task
          ▼
 ┌──────────────────────────────┐
 │ 4. Apply Appropriate SOP     │
-│    SOP 1 → 5 based on type   │
+│    SOP 1 → 7 based on type   │
 └──────────────────────────────┘
          │
          ▼
